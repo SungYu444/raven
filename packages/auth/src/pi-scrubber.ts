@@ -278,6 +278,9 @@ export class PiScrubber {
    */
   scrub(displayName: string | null | undefined): string | null | undefined {
     if (displayName == null) return displayName;
+    // A blank name carries no PI, and storing it would make scrubText()
+    // replace every empty string or run of spaces with a label.
+    if (displayName.trim() === "") return displayName;
     if (!this.isEnabled()) return displayName;
 
     const existing = this.nameMap.get(displayName);
