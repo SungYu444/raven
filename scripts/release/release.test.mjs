@@ -30,6 +30,18 @@ test("release catalog matches package metadata and MCP configuration", () => {
   assert.ok(releasedEntries(catalog).length > catalog.servers.length);
 });
 
+test("hosted Sysdig OAuth MCP uses remote HTTP and is excluded from bundled servers", () => {
+  const catalog = validateCatalog();
+  const mcp = readJson(new URL("../../.mcp.json", import.meta.url));
+  const sysdig = mcp.mcpServers["sysdig-secure-mcp"];
+
+  assert.deepEqual(sysdig, {
+    type: "http",
+    url: "https://secure.sysdig.com/mcp/secure",
+  });
+  assert.equal(catalog.servers.some(({ id }) => id === "sysdig-secure-mcp"), false);
+});
+
 test("major version increases require independent approval", () => {
   assert.equal(requiresMajorApproval("0.2.0", ["0.1.0"]), false);
   assert.equal(requiresMajorApproval("1.0.0", ["0.9.0"]), true);

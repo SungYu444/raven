@@ -27,13 +27,16 @@ RAVEN gives your local LLM direct access to our Atlassian tools via [MCP (Model 
 | **Artifactory** | Repositories, artifacts, checksums, properties, AQL searches, build-info, protected transfers, and guarded copy/move/delete operations |
 | **Jenkins** | Inspect and configure jobs; run and monitor builds; manage queue items, artifacts, promotions, and credential metadata/lifecycle |
 | **GitHub** | GHAS security: publish SARIF findings to code scanning; triage code/secret/Dependabot alerts; issues, PRs, and org security posture — all gated by a repository allow-list |
+| **Sysdig Secure** | Hosted regional MCP over Streamable HTTP with browser-based OAuth; tool catalog and permissions are managed by Sysdig |
 | **RFC Buddy** | Filter and search RFCs from current/completed schedule; updates/advances the API-side baseline |
 | **Health** | Sprint velocity, issue aging, composite health scores, workload, portfolio comparison |
 | **Overview** | One-shot cross-system project summary (Jira + Confluence + Bitbucket) |
 | **Bug Classifier** | Cluster Jira bugs by shared root cause across projects |
 | **Jarvis** | Query the central Jarvis application inventory (dynamic proxy to a BC Gov API) |
 
-See **[`docs/TOOL_INVENTORY.md`](docs/TOOL_INVENTORY.md)** for the complete tool catalog, per-server counts, and the read/write split. The Atlassian-backed servers (Jira, Confluence, Bitbucket, Assets, Overview, Health, Bug Classifier) share a single authentication session — log in once, use everywhere. Server Monitor, IMIS, Azure DevOps, Jarvis, Sonar, Jenkins, Artifactory, RFC Buddy, SharePoint, and GitHub authenticate separately via credentials in `~/.raven/.env`.
+See **[`docs/TOOL_INVENTORY.md`](docs/TOOL_INVENTORY.md)** for the complete tool catalog, per-server counts, and the read/write split. The Atlassian-backed servers (Jira, Confluence, Bitbucket, Assets, Overview, Health, Bug Classifier) share a single authentication session — log in once, use everywhere. Server Monitor, IMIS, Azure DevOps, Jarvis, Sonar, Jenkins, Artifactory, RFC Buddy, SharePoint, and GitHub authenticate using their configured local credentials and secrets.
+
+Sysdig Secure is configured as the remote `sysdig-secure-mcp` in [`.mcp.json`](.mcp.json), using the hosted Streamable HTTP endpoint and OAuth sign-in; Raven no longer installs a Sysdig local server or manages Sysdig API tokens. The checked-in URL uses Sysdig's documented US East (`us1`) endpoint; replace it with the MCP URL for your tenant's region if different. Authenticate in the Copilot MCP panel when prompted. The remote server acts with the authenticated Sysdig user's permissions and advertises its tool surface dynamically. This project-level OAuth configuration is for interactive Copilot clients; GitHub documents that Copilot cloud agent and code review do not support remote OAuth MCP servers. See [Sysdig's hosted MCP documentation](https://docs.sysdig.com/en/sysdig-secure/secure-ai/sysdig-mcp-server/) and [the tool inventory](docs/TOOL_INVENTORY.md).
 
 ### Autonomous Pipeline (`@nrs/pipeline`)
 

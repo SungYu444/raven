@@ -34,14 +34,14 @@
 
 ## 1. Executive Summary
 
-RAVEN (Resource Analytics, Visibility & Enterprise Navigator) is a suite of locally-run MCP servers that connect BC Gov enterprise systems — Jira, Confluence, Bitbucket, Jenkins, and application servers — to AI assistants such as GitHub Copilot. It is designed with security as a primary concern.
+RAVEN (Resource Analytics, Visibility & Enterprise Navigator) is a suite of Raven-owned, locally-run MCP servers that connect BC Gov enterprise systems — Jira, Confluence, Bitbucket, Jenkins, and application servers — to AI assistants such as GitHub Copilot. The Sysdig Secure integration is a separate hosted OAuth MCP endpoint configured alongside those local servers. The system is designed with security as a primary concern.
 
 **Key security properties:**
 
 - **The AI can only do what the tools explicitly allow.** There are no open-ended system commands, no database access, and no arbitrary API calls. Each tool is a narrow, purpose-built function with validated parameters.
 - **No data is retained by the AI.** Under a GitHub Copilot Business license with data exclusion enabled, prompts and responses are not stored, not used for training, and not logged by GitHub or any third party.
 - **Personal information is scrubbed before it reaches the AI.** A FOIPPA-compliant PI scrubber replaces names, emails, phone numbers, IDIR usernames, SINs, and tokens with anonymized placeholders.
-- **Credentials never leave the local machine.** Authentication tokens are held in process memory and attached to outbound HTTP requests. They are never included in MCP responses and never sent to the AI.
+- **Raven-managed credentials are isolated from the AI.** Tokens used by Raven's local servers are held in process memory and attached to outbound requests; they are never included in MCP responses. The hosted Sysdig integration is an exception to local credential handling: its OAuth flow is managed by the interactive MCP client, not Raven.
 - **All server monitoring is read-only.** SSH commands are validated against an allowlist of safe, read-only binaries. Shell injection is structurally impossible.
 
 This document provides a complete technical accounting of how these properties are enforced.
@@ -82,7 +82,7 @@ MCP (Model Context Protocol) is an open standard created by Anthropic and adopte
 
 3. **Responses are text-only.** The MCP server returns plain text (formatted as Markdown). There is no mechanism for returning executable code, binary data, or system commands.
 
-4. **Transport is local stdio.** The MCP server runs as a child process on the developer's machine. Communication happens over stdin/stdout — there is no network listener, no open port, and no remote access.
+4. **Raven-owned servers use local stdio.** These MCP servers run as child processes with no network listener. The hosted Sysdig Secure integration is configured separately as a remote Streamable HTTP MCP server and uses interactive OAuth; it is not a Raven-owned server.
 
 ### 2.3 What the AI Sees
 
@@ -158,13 +158,16 @@ When the AI connects to RAVEN, it receives a tool manifest — a list of availab
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+The diagram shows Raven-owned local servers. Sysdig Secure is configured separately in `.mcp.json` as a remote regional Streamable HTTP MCP endpoint and authenticates through the Copilot client's OAuth flow.
+
 ### 3.2 Key Architecture Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| **Local-only execution** | MCP servers run as local processes — no cloud deployment, no exposed ports |
-| **stdio transport** | No HTTP listeners, no WebSocket endpoints — eliminates remote attack surface |
-| **Separate credential store** | `~/.raven/.env` with `chmod 600` — credentials never in code or MCP responses |
+| **Raven-owned execution** | Raven-owned MCP servers run as local processes — no cloud deployment, no exposed ports |
+| **Raven-owned transport** | Raven-owned servers use stdio; the separate hosted Sysdig integration uses remote Streamable HTTP |
+| **Hosted Sysdig exception** | Sysdig Secure is a regional remote Streamable HTTP MCP endpoint using client-managed OAuth; see [README](../README.md) and [TOOL_INVENTORY.md](TOOL_INVENTORY.md) |
+| **Separate credential store** | Raven-managed credentials use `~/.raven/.env` with `chmod 600` and never appear in code or MCP responses; hosted Sysdig OAuth is managed by the MCP client |
 | **Per-tool schema validation** | Zod schemas enforce parameter types, ranges, and enums at the boundary |
 | **PI scrubbing layer** | FOIPPA-compliant anonymization before data reaches the AI |
 | **Read-only by default** | 121 of 181 locally-registered tools are read-only; 60 are writes. Jenkins and Artifactory writes include protected local transfers and guarded upstream mutations. See [TOOL_INVENTORY.md](TOOL_INVENTORY.md) for the authoritative split |
@@ -627,7 +630,8 @@ RAVEN does not expose arbitrary HTTP or filesystem access. Tool output passes th
 - BC Gov application servers (internal SSH via VPN)
 - Jenkins (`JENKINS_URL` / `JENKINS_BASE_URL`), on-prem Azure DevOps Server (`ADO_BASE_URL`), SonarQube (`SONARQUBE_URL`), JFrog Artifactory (`ARTIFACTORY_URL`), and RFC Buddy (`RFCBUDDY_URL`), when configured
 - HTTPS object-storage hosts explicitly allowlisted for Artifactory direct downloads (`RAVEN_ARTIFACTORY_DOWNLOAD_REDIRECT_HOSTS`); these receive no Raven credentials
-- **The Jarvis application-inventory API** (`JARVIS_BASE_URL`, required when `JARVIS_TOKEN` is set; no default endpoint). `jarvis-mcp` is a dynamic proxy: any Jarvis tool call is forwarded to the configured endpoint with a Personal Access Token. Unlike the other servers, which implement a fixed set of tools locally against the systems above, `jarvis-mcp` forwards opaque MCP requests to a remote MCP endpoint — its tool surface is defined remotely. That makes it the most relevant server to the "local-only" framing and to FOIPPA / data-residency review. The destination is fixed by configuration, not chosen by the AI.
+- **The Jarvis application-inventory API** (`JARVIS_BASE_URL`, required when `JARVIS_TOKEN` is set; no default endpoint). `jarvis-mcp` is a dynamic proxy: any Jarvis tool call is forwarded to the configured endpoint with a Personal Access Token. Unlike the other servers, which implement a fixed set of tools locally against the systems above, `jarvis-mcp` forwards opaque MCP requests to a remote MCP endpoint — its tool surface is defined remotely. Jarvis and hosted Sysdig are the remote MCP integrations and should be included in FOIPPA / data-residency review. The Jarvis destination is fixed by configuration, not chosen by the AI.
+- **Sysdig Secure hosted MCP** — `sysdig-secure-mcp` in `.mcp.json` connects to the configured regional `/mcp/secure` HTTPS endpoint using Streamable HTTP and interactive OAuth. Its tool surface is managed by Sysdig and is not implemented or credentialed by Raven. The checked-in endpoint is US East (`us1`); use the tenant's region-specific URL when different. Copilot cloud agent and code review do not support this remote OAuth configuration.
 
 The AI cannot instruct RAVEN to phone home to an unconfigured host, exfiltrate data to an attacker-controlled URL, or communicate with any system not explicitly programmed into a tool.
 
