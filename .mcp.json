@@ -69,8 +69,8 @@
       "args": ["./packages/github-mcp/dist/index.js"]
     },
     "sysdig-secure-mcp": {
-      "type": "http",
-      "url": "https://secure.sysdig.com/mcp/secure"
+      "command": "node",
+      "args": ["./packages/sysdig-mcp/dist/index.js"]
     }
   }
 }

@@ -18,13 +18,13 @@
 | MCP servers | **18** |
 | Tools registered locally (in-process) | **236** |
 | Tools dynamically proxied from the remote Jarvis API | **~6** (not part of the 236 — see [jarvis-mcp](#jarvis-mcp--dynamic-remote-proxy--data-egress)) |
-| Tools dynamically hosted by Sysdig Secure | Dynamic OAuth tool surface (excluded from totals) |
+| Tools dynamically proxied by Raven's Sysdig read-only wrapper | Dynamic filtered tool surface (excluded from fixed totals) |
 | **Known tools advertised to the AI when everything is connected** | **~242**, excluding dynamic Sysdig tools |
 | Mutating / write tools | **~82** (81 local + ~1 via Jarvis; Sysdig excluded) |
 | Read-only tools | **~160**, excluding dynamic Sysdig tools |
 | Non-server packages | `auth`, `pipeline`, `server-ui`, `raven-cli` |
 
-Servers map 1:1 to the keys in [`../.mcp.json`](../.mcp.json). The Atlassian-backed servers (Jira, Confluence, Bitbucket, Assets, Overview, Health, Bug Classifier) share one SiteMinder/Basic-Auth session; Server Monitor, IMIS, Azure DevOps / TFS, Sonar, Jenkins, Artifactory, RFC Buddy, and Jarvis authenticate separately via `~/.raven/.env`. Sysdig is a hosted OAuth MCP server and uses no Raven-local credentials.
+Servers map 1:1 to the keys in [`../.mcp.json`](../.mcp.json). The Atlassian-backed servers (Jira, Confluence, Bitbucket, Assets, Overview, Health, Bug Classifier) share one SiteMinder/Basic-Auth session; Server Monitor, IMIS, Azure DevOps / TFS, Sonar, Jenkins, Artifactory, RFC Buddy, and Jarvis authenticate separately via `~/.raven/.env`. Sysdig uses the local `sysdig-mcp` read-only OAuth proxy and does not use a Sysdig API token.
 
 ## Read / write summary
 
@@ -48,7 +48,7 @@ Servers map 1:1 to the keys in [`../.mcp.json`](../.mcp.json). The Atlassian-bac
 | GitHub | `github` | 19 | 15 | 34 |
 | **Subtotal (local)** | | **155** | **81** | **236** |
 | Jarvis (remote proxy) | `jarvis` | ~5 | ~1 | ~6 |
-| Sysdig Secure (hosted OAuth) | `sysdig-secure-mcp` | dynamic | dynamic | not counted |
+| Sysdig Secure (read-only OAuth proxy) | `sysdig-secure-mcp` | dynamic | 0 | not counted |
 | **Known advertised total** | | **~160** | **~82** | **~242** (excludes dynamic Sysdig tools) |
 
 ## Servers and tools
@@ -138,8 +138,8 @@ Servers map 1:1 to the keys in [`../.mcp.json`](../.mcp.json). The Atlassian-bac
 - The tool list is **whatever the remote advertises at runtime** — currently ~6: `get_application`, `list_ministries`, `search_applications`, `list_technologies`, `get_application_provenance` (read) and `update_application` (write). Treat that count as a snapshot, not a fixed contract.
 - It forwards opaque MCP requests/responses to a separately-hosted BC Gov API whose tool surface is defined remotely.
 
-#### Sysdig Secure — hosted OAuth MCP — **data egress**
-Sysdig is configured directly as the remote `sysdig-secure-mcp` in `.mcp.json` using Streamable HTTP and interactive OAuth. It does not run a Raven package, store API credentials, or require Sysdig token variables in `~/.raven/.env`. The MCP tool catalog and permissions are managed by Sysdig and the signed-in user's account. The checked-in URL targets the documented US East (`us1`) region; update it to the tenant's regional `/mcp/secure` URL if needed. OAuth remote MCP is for interactive Copilot clients; Copilot cloud agent and code review do not currently support this authentication mode.
+#### Sysdig Secure — Raven read-only OAuth proxy — **data egress**
+The local `sysdig-mcp` package connects to Sysdig's hosted `/mcp/secure` endpoint using Streamable HTTP and its own interactive OAuth flow. It filters the remote catalog to tools explicitly marked read-only or included in Raven's reviewed read-only allowlist, then rechecks the policy before forwarding every call. It does not expose prompts/resources or write-capable tools. OAuth client state and tokens remain in process memory and are not stored in `~/.raven/.env`; users may need to authenticate again after the wrapper process restarts. The default endpoint is US East (`us1`); set `SYSDIG_SECURE_MCP_URL` for another supported region.
 
 Both remote integrations send MCP requests to their configured upstream services. Review each provider's OAuth permissions, data handling, and tool surface for FOIPPA and data-residency requirements.
 
