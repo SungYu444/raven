@@ -1,8 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import sanitizeHtml from "sanitize-html";
+import { PiScrubber } from "@nrs/auth";
 import { AdoClient } from "./ado-client.js";
 import type { AdoWorkItem, AdoPatchOperation } from "./types.js";
+
+const pi = new PiScrubber();
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -18,7 +21,7 @@ function formatWorkItem(item: AdoWorkItem): string {
   const type     = field(item, "System.WorkItemType");
   const state    = field(item, "System.State");
   const priority = field(item, "Microsoft.VSTS.Common.Priority");
-  const assigned = (item.fields["System.AssignedTo"] as { displayName?: string } | undefined)?.displayName ?? "Unassigned";
+  const assigned = pi.scrub((item.fields["System.AssignedTo"] as { displayName?: string } | undefined)?.displayName) ?? "Unassigned";
   const created  = field(item, "System.CreatedDate");
   const updated  = field(item, "System.ChangedDate");
   const desc     = sanitizeHtml(field(item, "System.Description"), { allowedTags: [], allowedAttributes: {} }).replace(/\s{2,}/g, " ").trim();
@@ -32,7 +35,7 @@ function formatWorkItem(item: AdoWorkItem): string {
   ];
   if (desc) lines.push(`\n**Description:**\n${desc.slice(0, 1500)}`);
   if (repro) lines.push(`\n**Repro Steps:**\n${repro.slice(0, 1500)}`);
-  return lines.join("\n");
+  return pi.scrubText(lines.join("\n"));
 }
 
 function refNameToBranch(refName: string): string {
@@ -57,7 +60,7 @@ export function createAdoServer(): McpServer {
   const server = new McpServer(
     { name: "RAVEN Azure DevOps / TFS", version: "0.1.0" },
     {
-      instructions: `You have access to tools for a locally hosted Azure DevOps Server / TFS instance. Use these tools for Azure DevOps or TFS URLs, including collection/project paths such as /COLLECTION/PROJECT and classic build or release pages under /_build and /_release (for example, /_release?...definitionId=1). Tools cover work items (search, read, create, update, comment), repositories, branches, file browsing, pull requests, YAML and designer pipelines, classic build pipelines, and classic release pipelines. Write tools (create_work_item, update_work_item, add_work_item_comment, create_pull_request) modify live ADO data — confirm with the user before calling them. Set ADO_BASE_URL, ADO_PAT, and ADO_DEFAULT_PROJECT in ~/.raven/.env (or the DPAPI-encrypted equivalent on Windows). For multi-collection ADO Server instances, set ADO_DEFAULT_COLLECTION or pass the collection parameter to each tool.${WORKAROUND_NOTE}`,
+      instructions: `You have access to tools for Azure DevOps Services and Azure DevOps Server / TFS. Set ADO_BASE_URL explicitly to https://dev.azure.com for Cloud or the on-prem Server HTTPS base URL; set ADO_DEFAULT_COLLECTION to the Cloud organization name or the Server collection (or pass collection to a tool other than list_projects). Server URLs include collection/project paths such as /COLLECTION/PROJECT and classic build or release pages under /_build and /_release. Tools cover work items, repositories, pull requests, and pipelines. Write tools (create_work_item, update_work_item, add_work_item_comment, create_pull_request) modify live ADO data — confirm with the user before calling them. Set ADO_PAT and ADO_DEFAULT_PROJECT in ~/.raven/.env (or the DPAPI-encrypted equivalent on Windows).${WORKAROUND_NOTE}`,
     }
   );
 
@@ -65,10 +68,10 @@ export function createAdoServer(): McpServer {
 
   function getClient(): AdoClient {
     if (!client) {
-      const baseUrl = process.env["ADO_BASE_URL"];
+      const baseUrl = process.env["ADO_BASE_URL"]?.trim();
       const pat     = process.env["ADO_PAT"];
-      if (!baseUrl) throw new Error("ADO_BASE_URL is not set. Add it to ~/.raven/.env.");
       if (!pat)     throw new Error("ADO_PAT is not set. Add it to ~/.raven/.env.");
+      if (!baseUrl) throw new Error("ADO_BASE_URL is not set. Configure an explicit HTTPS Azure DevOps Cloud or Server URL.");
       const apiVersion = process.env["ADO_API_VERSION"] ?? "7.1";
       client = new AdoClient(baseUrl, pat, apiVersion);
     }
@@ -82,11 +85,15 @@ export function createAdoServer(): McpServer {
   }
 
   function defaultCollection(supplied?: string): string | undefined {
-    return supplied || process.env["ADO_DEFAULT_COLLECTION"] || undefined;
+    const collection = supplied || process.env["ADO_DEFAULT_COLLECTION"] || undefined;
+    if (!collection && client?.isCloud) {
+      throw new Error("Set ADO_DEFAULT_COLLECTION to the Cloud organization name or supply collection.");
+    }
+    return collection;
   }
 
   const safeErr = (err: unknown) =>
-    err instanceof Error ? err.message : String(err);
+    pi.scrubText(err instanceof Error ? err.message : String(err));
 
   // ---------------------------------------------------------------------------
   // Work item tools
@@ -106,7 +113,7 @@ Returns the top matching work items with their titles, types, states, and priori
     {
       wiql: z.string().describe("WIQL query string"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
       top: z.number().int().min(1).max(200).default(20).describe("Maximum number of results"),
     },
     { readOnlyHint: true },
@@ -121,7 +128,7 @@ Returns the top matching work items with their titles, types, states, and priori
 
         const items = await ado.getWorkItems(ids.slice(0, top), proj, col);
         const text = items.map(formatWorkItem).join("\n\n---\n\n");
-        return { content: [{ type: "text", text: `**${items.length} work item(s) found:**\n\n${text}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${items.length} work item(s) found:**\n\n${text}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -134,7 +141,7 @@ Returns the top matching work items with their titles, types, states, and priori
     {
       id: z.number().int().describe("Work item ID"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ id, project, collection }) => {
@@ -151,12 +158,14 @@ Returns the top matching work items with their titles, types, states, and priori
           if (comments.comments.length > 0) {
             commentsText = "\n\n**Comments:**\n" + comments.comments
               .slice(0, 20)
-              .map((c) => `- **${c.createdBy.displayName}** (${c.createdDate.slice(0, 10)}): ${sanitizeHtml(c.text, { allowedTags: [], allowedAttributes: {} }).trim()}`)
+              .map((c) => `- **${pi.scrub(c.createdBy.displayName)}** (${c.createdDate.slice(0, 10)}): ${sanitizeHtml(c.text, { allowedTags: [], allowedAttributes: {} }).trim()}`)
               .join("\n");
           }
-        } catch { /* comments are optional */ }
+        } catch (commentErr) {
+          commentsText = `\n\n**Comments unavailable:** ${safeErr(commentErr)}`;
+        }
 
-        return { content: [{ type: "text", text: formatWorkItem(item) + commentsText }] };
+        return { content: [{ type: "text", text: pi.scrubText(formatWorkItem(item) + commentsText) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -179,7 +188,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       iterationPath: z.string().optional().describe("Iteration path, e.g. 'MyProject\\\\Sprint 5'"),
       tags: z.string().optional().describe("Semicolon-separated tags"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: false },
     async ({ type, title, description, priority, assignedTo, areaPath, iterationPath, tags, project, collection }) => {
@@ -199,7 +208,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         if (tags)           ops.push({ op: "add", path: "/fields/System.Tags", value: tags });
 
         const item = await ado.createWorkItem(type, proj, ops, col);
-        return { content: [{ type: "text", text: `Work item created: #${item.id} — ${field(item, "System.Title")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`Work item created: #${item.id} — ${field(item, "System.Title")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -218,7 +227,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       description: z.string().optional().describe("New description (HTML allowed)"),
       tags: z.string().optional().describe("Semicolon-separated tags (replaces existing)"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: false },
     async ({ id, title, state, priority, assignedTo, description, tags, project, collection }) => {
@@ -254,7 +263,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       id: z.number().int().describe("Work item ID"),
       text: z.string().describe("Comment text (HTML allowed)"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: false },
     async ({ id, text, project, collection }) => {
@@ -279,7 +288,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
     "List all Git repositories in an Azure DevOps project.",
     {
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ project, collection }) => {
@@ -290,7 +299,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const lines = data.value.map(
           (r) => `- **${r.name}** (id: ${r.id}) — default branch: ${r.defaultBranch ?? "unknown"}\n  ${r.webUrl ?? ""}`
         );
-        return { content: [{ type: "text", text: `**${data.count} repo(s) in ${proj}:**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} repo(s) in ${proj}:**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -304,7 +313,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       repo: z.string().describe("Repository name or ID"),
       filter: z.string().optional().describe("Optional substring filter for branch names"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ repo, filter, project, collection }) => {
@@ -316,7 +325,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const lines = branches.map(
           (r) => `- ${refNameToBranch(r.name)} (${r.objectId.slice(0, 8)})`
         );
-        return { content: [{ type: "text", text: `**${branches.length} branch(es) in ${repo}:**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${branches.length} branch(es) in ${repo}:**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -331,7 +340,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       path: z.string().default("/").describe("Path to browse (default: root '/')"),
       branch: z.string().default("main").describe("Branch name (default: 'main')"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ repo, path, branch, project, collection }) => {
@@ -342,7 +351,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const lines = data.value.map(
           (item) => `${item.isFolder ? "📁" : "📄"} ${item.path}`
         );
-        return { content: [{ type: "text", text: `**${data.count} item(s) at ${path} (${branch}):**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} item(s) at ${path} (${branch}):**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -357,7 +366,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       path: z.string().describe("File path, e.g. '/src/main/java/com/example/App.java'"),
       branch: z.string().default("main").describe("Branch name (default: 'main')"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ repo, path, branch, project, collection }) => {
@@ -368,7 +377,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const truncated = content.length > 50_000
           ? content.slice(0, 50_000) + "\n\n[...truncated at 50 000 characters]"
           : content;
-        return { content: [{ type: "text", text: `**${path}** (${branch})\n\n\`\`\`\n${truncated}\n\`\`\`` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${path}** (${branch})\n\n\`\`\`\n${truncated}\n\`\`\``) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -387,7 +396,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       status: z.enum(["active", "completed", "abandoned", "all"]).default("active").describe("PR status filter"),
       top: z.number().int().min(1).max(100).default(25).describe("Maximum number of results"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ repo, status, top, project, collection }) => {
@@ -395,12 +404,12 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const ado  = getClient();
         const proj = defaultProject(project);
         const data = await ado.listPullRequests(proj, repo, status, top, defaultCollection(collection));
-        if (data.count === 0) return { content: [{ type: "text", text: `No ${status} pull requests found in ${repo}.` }] };
+        if (data.count === 0) return { content: [{ type: "text", text: pi.scrubText(`No ${status} pull requests found in ${repo}.`) }] };
 
         const lines = data.value.map((pr) =>
-          `- **#${pr.pullRequestId}** ${pr.title}\n  ${refNameToBranch(pr.sourceRefName)} → ${refNameToBranch(pr.targetRefName)} | by ${pr.createdBy.displayName} | ${pr.status}`
+          `- **#${pr.pullRequestId}** ${pr.title}\n  ${refNameToBranch(pr.sourceRefName)} → ${refNameToBranch(pr.targetRefName)} | by ${pi.scrub(pr.createdBy.displayName)} | ${pr.status}`
         );
-        return { content: [{ type: "text", text: `**${data.count} PR(s) in ${repo} (${status}):**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} PR(s) in ${repo} (${status}):**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -414,7 +423,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       repo: z.string().describe("Repository name or ID"),
       prId: z.number().int().describe("Pull request ID"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ repo, prId, project, collection }) => {
@@ -426,7 +435,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const reviewers = pr.reviewers
           .map((r) => {
             const vote = r.vote === 10 ? "✅" : r.vote === -10 ? "❌" : r.vote === 5 ? "✔" : "⏳";
-            return `  ${vote} ${r.displayName}`;
+            return `  ${vote} ${pi.scrub(r.displayName)}`;
           })
           .join("\n");
 
@@ -434,12 +443,12 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
           `### PR #${pr.pullRequestId}: ${pr.title}`,
           `**Status:** ${pr.status} | **Created:** ${pr.creationDate.slice(0, 10)}`,
           `**From:** ${refNameToBranch(pr.sourceRefName)} → **Into:** ${refNameToBranch(pr.targetRefName)}`,
-          `**Author:** ${pr.createdBy.displayName}`,
+          `**Author:** ${pi.scrub(pr.createdBy.displayName)}`,
           reviewers ? `**Reviewers:**\n${reviewers}` : "",
           pr.description ? `\n**Description:**\n${pr.description}` : "",
         ].filter(Boolean).join("\n");
 
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text: pi.scrubText(text) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -457,7 +466,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
       description: z.string().optional().describe("PR description"),
       isDraft: z.boolean().default(false).describe("Create as draft PR"),
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: false },
     async ({ repo, title, sourceBranch, targetBranch, description, isDraft, project, collection }) => {
@@ -474,7 +483,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         return {
           content: [{
             type: "text",
-            text: `Pull request created: **#${pr.pullRequestId}** — ${pr.title}\n${pr.url ?? ""}`,
+            text: pi.scrubText(`Pull request created: **#${pr.pullRequestId}** — ${pr.title}\n${pr.url ?? ""}`),
           }],
         };
       } catch (err) {
@@ -489,12 +498,21 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
 
   server.tool(
     "list_projects",
-    "List all team projects across all collections in the Azure DevOps Server instance.",
+    "List team projects in the configured Cloud organization or across collections on Azure DevOps Server.",
     {},
     { readOnlyHint: true },
     async () => {
       try {
         const ado = getClient();
+        if (ado.isCloud) {
+          const organization = process.env["ADO_DEFAULT_COLLECTION"]?.trim();
+          if (!organization) throw new Error("Set ADO_DEFAULT_COLLECTION to the Cloud organization name for list_projects.");
+          const data = await ado.listProjects(organization);
+          const lines = data.value.map(
+            (p) => `- **${p.name}** (${p.state})${p.description ? " — " + p.description : ""}`
+          );
+          return { content: [{ type: "text", text: pi.scrubText(lines.length ? lines.join("\n") : "No projects found.") }] };
+        }
         const collections = await ado.listCollections();
         if (collections.count === 0) return { content: [{ type: "text", text: "No collections found." }] };
 
@@ -514,7 +532,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
             sections.push(`### ${col.name}\n_Error: ${safeErr(colErr)}_`);
           }
         }
-        return { content: [{ type: "text", text: sections.join("\n\n") }] };
+        return { content: [{ type: "text", text: pi.scrubText(sections.join("\n\n")) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -526,7 +544,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
     "List pipelines from the Azure DevOps Pipelines service, including YAML and designer-configured pipeline records. For classic Build service definitions, use list_build_pipelines.",
     {
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ project, collection }) => {
@@ -534,11 +552,11 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const ado  = getClient();
         const proj = defaultProject(project);
         const data = await ado.listPipelines(proj, defaultCollection(collection));
-        if (data.count === 0) return { content: [{ type: "text", text: `No pipelines found in ${proj}.` }] };
+        if (data.count === 0) return { content: [{ type: "text", text: pi.scrubText(`No pipelines found in ${proj}.`) }] };
         const lines = data.value.map(
           (p) => `- **#${p.id}** ${formatPipelineName(p.folder, p.name)}`
         );
-        return { content: [{ type: "text", text: `**${data.count} pipeline(s) in ${proj}:**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} pipeline(s) in ${proj}:**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -550,7 +568,7 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
     "List Azure DevOps / TFS Build service definitions, including classic build pipelines.",
     {
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ project, collection }) => {
@@ -558,11 +576,11 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
         const ado  = getClient();
         const proj = defaultProject(project);
         const data = await ado.listBuildPipelines(proj, defaultCollection(collection));
-        if (data.count === 0) return { content: [{ type: "text", text: `No build pipelines found in ${proj}.` }] };
+        if (data.count === 0) return { content: [{ type: "text", text: pi.scrubText(`No build pipelines found in ${proj}.`) }] };
         const lines = data.value.map(
           (p) => `- **#${p.id}** ${formatPipelineName(p.path, p.name)}${p.queueStatus ? ` (${p.queueStatus})` : ""}`
         );
-        return { content: [{ type: "text", text: `**${data.count} build pipeline(s) in ${proj}:**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} build pipeline(s) in ${proj}:**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
@@ -571,22 +589,23 @@ Priority values: 1 (Critical), 2 (High), 3 (Medium), 4 (Low).`,
 
   server.tool(
     "list_release_pipelines",
-    "List classic release pipelines defined in an Azure DevOps project.",
+    "List classic release pipelines on Azure DevOps Server (Cloud releases use a different host).",
     {
       project: z.string().optional().describe("Project name (uses ADO_DEFAULT_PROJECT if omitted)"),
-      collection: z.string().optional().describe("Collection name — required on multi-collection ADO Server instances"),
+      collection: z.string().optional().describe("Cloud organization or on-prem collection (uses ADO_DEFAULT_COLLECTION if omitted)"),
     },
     { readOnlyHint: true },
     async ({ project, collection }) => {
       try {
         const ado  = getClient();
+        if (ado.isCloud) throw new Error("list_release_pipelines is Server only; Cloud releases require the separate vsrm.dev.azure.com host.");
         const proj = defaultProject(project);
         const data = await ado.listReleasePipelines(proj, defaultCollection(collection));
-        if (data.count === 0) return { content: [{ type: "text", text: `No release pipelines found in ${proj}.` }] };
+        if (data.count === 0) return { content: [{ type: "text", text: pi.scrubText(`No release pipelines found in ${proj}.`) }] };
         const lines = data.value.map(
           (p) => `- **#${p.id}** ${formatPipelineName(p.path, p.name)}`
         );
-        return { content: [{ type: "text", text: `**${data.count} release pipeline(s) in ${proj}:**\n\n${lines.join("\n")}` }] };
+        return { content: [{ type: "text", text: pi.scrubText(`**${data.count} release pipeline(s) in ${proj}:**\n\n${lines.join("\n")}`) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${safeErr(err)}` }], isError: true };
       }
