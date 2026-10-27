@@ -139,7 +139,7 @@ Trust this file for build/test commands, project layout, conventions, and trust-
 
 # RAVEN MCP Tools — Chat-time Reference
 
-Everything above is for repo navigation and PR review. **The sections below are for Copilot Chat in IDEs when this repo's MCP servers are connected** (clients pick these up via `.mcp.json`). RAVEN connects to configured BC Gov upstreams and also to the hosted Jarvis and Sysdig MCP services. Sysdig Secure MCP is hosted in US East; its STRA has been completed and data sovereignty acknowledged. Artifactory direct downloads may additionally read from explicitly allowlisted HTTPS storage hosts without sending Artifactory credentials. See [`../docs/TOOL_INVENTORY.md`](../docs/TOOL_INVENTORY.md).
+Everything above is for repo navigation and PR review. **The sections below are for Copilot Chat in IDEs when this repo's MCP servers are connected** (clients pick these up via `.mcp.json`). RAVEN's MCP servers connect to explicitly configured upstreams. Azure DevOps Services and SonarQube Cloud are external to BC Gov infrastructure and require opt-in HTTPS URLs and a data-residency review before use with enterprise data; SonarQube Cloud offers EU and US regions, not a Canadian region; Sysdig Secure MCP is hosted in US East; its STRA has been completed and data sovereignty acknowledged. Artifactory direct downloads may additionally read from explicitly allowlisted HTTPS storage hosts without sending Artifactory credentials. See [`../docs/TOOL_INVENTORY.md`](../docs/TOOL_INVENTORY.md).
 
 **CRITICAL:** When a user asks you to do something, **actively call the tools** — do not just describe what you would do. Chain multiple tool calls together to complete multi-step tasks.
 
@@ -334,14 +334,16 @@ Query the Jira Assets (Insight) CMDB for ministry applications, environments, te
 
 **IMPORTANT — PR target branch:** Most BC Gov repos do NOT have a `main` branch. The default target for PRs should be the **release branch** you branched from (e.g., `release/2.0.3`), NOT `main`. Always set `toBranch` to the release branch.
 
-### Azure DevOps / TFS (16 tools)
+### Azure DevOps / TFS
 
-On-prem Azure DevOps Server / TFS — work items (WIQL), repos, pull requests, YAML/designer pipelines, classic build pipelines, and classic release pipelines. Use these tools for TFS URLs with collection/project paths and `/_build` or `/_release` routes. Requires `ADO_BASE_URL` + `ADO_PAT` in `~/.raven/.env`.
+Azure DevOps Services and on-prem Server / TFS — work items (WIQL), repos, pull requests, YAML/designer pipelines, classic build pipelines, and Server classic release pipelines. Set `ADO_BASE_URL` explicitly to `https://dev.azure.com` for Cloud or the Server HTTPS base URL; set `ADO_DEFAULT_COLLECTION` to the Cloud organization or Server collection. Set `ADO_PAT` in `~/.raven/.env`. Tools except `list_projects` accept a `collection` override; Cloud `list_projects` requires `ADO_DEFAULT_COLLECTION`. Use Server tools for TFS URLs with collection/project paths and `/_build` or `/_release` routes.
+Classic release definitions on Azure DevOps Services use a separate `vsrm.dev.azure.com` host; `list_release_pipelines` does not switch hosts and is intended for Server.
 
 **Search & read:**
-- `list_projects` — List all projects across all collections.
+- `list_projects` — List projects in the configured Cloud organization or across all Server collections.
 - `search_work_items` — Search work items via WIQL.
 - `get_work_item` — Full work-item details by ID.
+- `get_work_item_history` — Paged field and relationship changes by work-item ID. Use `top` (1–100) and `skip` for pagination.
 - `list_repos` / `list_branches` — Repos and branches in a project.
 - `browse_files` / `read_file` — Browse and read repo files.
 - `list_pull_requests` / `get_pull_request` — PR list and details.
@@ -388,7 +390,11 @@ On-prem Azure DevOps Server / TFS — work items (WIQL), repos, pull requests, Y
 - `list_technologies` — List all distinct technology tags (databases, frameworks, runtimes, servers, etc.) with usage counts across the full inventory. Accepts optional prefix filter `query`.
 - `get_application_provenance` — Retrieve the field-level audit trail / provenance history showing when fields were modified, what data sources modified them, and their previous vs. new values.
 
-### SonarQube (6 tools)
+### SonarQube
+Set `SONARQUBE_URL` explicitly to `https://sonarcloud.io` (EU Cloud), `https://sonarqube.us` (US Cloud), or an on-prem SonarQube Server HTTPS URL. A `SONARQUBE_TOKEN` is required for API calls.
+For Cloud project listing, pass the `organization` argument to `sonar_list_projects`; for Cloud .NET scans, pass `/o:<organization>` in `sonar_run_scan`'s `extraArgs`.
+For US Cloud scans (`sonarqube.us`), pass `-Dsonar.region=us` in `extraArgs`; scanners default to EU and the US region requires a sufficiently recent scanner.
+- `sonar_list_projects` — List projects in the supplied Cloud organization or on the configured Server.
 - `sonar_list_issues` — List open issues for a SonarQube project and branch (supports scope/new-code filters).
 - `sonar_get_quality_gate` — Get quality gate status for a project/branch, including failing conditions.
 - `sonar_get_last_scan` — Get the latest analysis for a project/branch plus its quality gate status.

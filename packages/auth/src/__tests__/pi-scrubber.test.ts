@@ -416,3 +416,23 @@ describe("PiScrubber.scrubText — quoted values containing an escaped quote", (
     expect(pi.scrubText('{"password":"\\"\\"\\"\\""}')).toBe("{[CREDENTIAL]}");
   });
 });
+
+describe("PiScrubber.scrub — blank names", () => {
+  let pi: PiScrubber;
+  beforeEach(() => { delete process.env["RAVEN_SCRUB_PI"]; pi = new PiScrubber(); });
+
+  it("returns an empty name unchanged and does not corrupt later text", () => {
+    expect(pi.scrub("")).toBe("");
+    expect(pi.scrubText("status ok")).toBe("status ok");
+  });
+
+  it("returns a whitespace-only name unchanged and does not rewrite spaces", () => {
+    expect(pi.scrub("  ")).toBe("  ");
+    expect(pi.scrubText("a  b")).toBe("a  b");
+  });
+
+  it("does not consume a label number for a blank name", () => {
+    pi.scrub("");
+    expect(pi.scrub("Jane Smith")).toBe("Person-1");
+  });
+});

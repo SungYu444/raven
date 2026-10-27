@@ -9,8 +9,8 @@ import type {
 } from "./types.js";
 
 /**
- * REST client for SonarQube Server (Community Build + Community Branch Plugin
- * or commercial editions). Targets the stable Web API surface; branch-aware
+ * REST client for SonarQube Cloud and Server (Community Build + Community Branch
+ * Plugin or commercial editions). Targets the stable Web API surface; branch-aware
  * endpoints work transparently when the Community Branch Plugin is installed.
  *
  * Auth: User token via HTTP Basic auth with an empty password
@@ -24,6 +24,11 @@ export class SonarClient {
   constructor(baseUrl: string, token: string, fetchFn?: typeof globalThis.fetch) {
     let url = baseUrl;
     while (url.endsWith("/")) url = url.slice(0, -1);
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") throw new Error("SONARQUBE_URL must use HTTPS.");
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error("SONARQUBE_URL must not contain credentials, a query, or a fragment.");
+    }
     this.baseUrl = url;
     this.authHeader = `Basic ${Buffer.from(`${token}:`).toString("base64")}`;
     this.fetchFn = fetchFn ?? globalThis.fetch;
@@ -49,6 +54,7 @@ export class SonarClient {
 
     const resp = await this.fetchFn(url, {
       ...fetchOpts,
+      redirect: "error",
       headers: {
         Authorization: this.authHeader,
         Accept: "application/json",
@@ -65,12 +71,17 @@ export class SonarClient {
     return (await resp.json()) as T;
   }
 
-  /** List every project visible to the configured SonarQube token. */
-  async listProjects(): Promise<SonarProject[]> {
+  /** List projects visible to the token within a Cloud organization or on Server. */
+  async listProjects(organization?: string): Promise<SonarProject[]> {
+    const isCloud = ["sonarcloud.io", "sonarqube.us"].includes(new URL(this.baseUrl).hostname);
+    const cloudOrganization = organization?.trim();
+    if (isCloud && !cloudOrganization) {
+      throw new Error("SonarQube Cloud project listing requires an organization argument.");
+    }
     const projects: SonarProject[] = [];
     for (let page = 1; ; page++) {
       const result = await this.request<SonarProjectsPage>("api/components/search", {
-        params: { qualifiers: "TRK", p: page, ps: 100 },
+        params: { qualifiers: "TRK", p: page, ps: 100, organization: isCloud ? cloudOrganization : undefined },
       });
       if (
         !Array.isArray(result.components) ||
