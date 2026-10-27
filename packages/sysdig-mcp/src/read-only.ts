@@ -17,12 +17,23 @@ const DOCUMENTED_READ_ONLY_TOOLS = new Set([
   "test_posture_rego",
 ]);
 
+/** Return known tools for startup discovery without initiating OAuth. */
+export function getInitialReadOnlyTools(): Tool[] {
+  return [...DOCUMENTED_READ_ONLY_TOOLS].map((name) => ({
+    name,
+    description: "Known Sysdig Secure tool; its current read-only status and schema are verified with Sysdig before execution.",
+    inputSchema: { type: "object", additionalProperties: true },
+  }));
+}
+
+/** Apply Raven's Sysdig read-only hint policy to one upstream tool. */
 export function isReadOnlyTool(tool: Pick<Tool, "name" | "annotations">): boolean {
   if (tool.annotations?.readOnlyHint === false) return false;
   if (tool.annotations?.readOnlyHint === true) return true;
   return DOCUMENTED_READ_ONLY_TOOLS.has(tool.name);
 }
 
+/** Filter an upstream catalog to tools accepted by the current read-only policy. */
 export function filterReadOnlyTools<T extends Pick<Tool, "name" | "annotations">>(
   tools: T[],
 ): T[] {

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import { randomBytes } from "node:crypto";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -22,6 +23,7 @@ interface PendingCallback {
   timeout: NodeJS.Timeout;
 }
 
+/** Owns the loopback listener used to receive a Sysdig OAuth callback. */
 export class SysdigOAuthCallback {
   private server: HttpServer | undefined;
   private redirectUri: string | undefined;
@@ -30,7 +32,15 @@ export class SysdigOAuthCallback {
   async listen(): Promise<string> {
     if (this.server && this.redirectUri) return this.redirectUri;
 
-    this.server = createServer((request, response) => this.handleRequest(request, response));
+    this.server = createServer((request, response) => {
+      void this.handleRequest(request, response).catch(() => {
+        if (response.headersSent) response.destroy();
+        else {
+          response.writeHead(500);
+          response.end();
+        }
+      });
+    });
     await new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
       this.server!.listen(0, "127.0.0.1", () => {
@@ -47,24 +57,33 @@ export class SysdigOAuthCallback {
     return this.redirectUri;
   }
 
+  /** Wait for a state-validated authorization code from the local callback. */
   waitForCode(expectedState: string): Promise<string> {
     if (this.pending) throw new Error("A Sysdig OAuth callback is already pending.");
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending = undefined;
         reject(new Error("Sysdig OAuth authorization timed out."));
+        void this.closeServer().catch(() => {
+          process.stderr.write("[sysdig-mcp] Could not close the OAuth callback listener after timeout.\n");
+        });
       }, CALLBACK_TIMEOUT_MS);
       timeout.unref();
       this.pending = { expectedState, resolve, reject, timeout };
     });
   }
 
+  /** Close the local callback listener and reject any pending authorization. */
   async close(): Promise<void> {
     if (this.pending) {
       clearTimeout(this.pending.timeout);
       this.pending.reject(new Error("Sysdig OAuth callback server closed."));
       this.pending = undefined;
     }
+    await this.closeServer();
+  }
+
+  private async closeServer(): Promise<void> {
     const server = this.server;
     this.server = undefined;
     this.redirectUri = undefined;
@@ -75,8 +94,18 @@ export class SysdigOAuthCallback {
     }
   }
 
-  private handleRequest(request: IncomingMessage, response: import("node:http").ServerResponse): void {
-    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+  private async handleRequest(
+    request: IncomingMessage,
+    response: import("node:http").ServerResponse,
+  ): Promise<void> {
+    let requestUrl: URL;
+    try {
+      requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    } catch {
+      response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Malformed OAuth callback request.");
+      return;
+    }
     if (request.method !== "GET" || requestUrl.pathname !== "/callback" || !this.pending) {
       response.writeHead(404);
       response.end();
@@ -94,6 +123,7 @@ export class SysdigOAuthCallback {
       this.settlePending(new Error("Sysdig OAuth authorization was denied."));
       response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
       response.end("Authorization was not completed. Return to Raven for details.");
+      await this.closeServer();
       return;
     }
 
@@ -107,6 +137,7 @@ export class SysdigOAuthCallback {
     this.settlePending(undefined, code);
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end("<!doctype html><title>Sysdig connected</title><p>Sysdig sign-in complete. You can close this tab.</p>");
+    await this.closeServer();
   }
 
   private settlePending(error?: Error, code?: string): void {
@@ -119,13 +150,15 @@ export class SysdigOAuthCallback {
   }
 }
 
-class EphemeralSysdigOAuthProvider implements OAuthClientProvider {
+/** Supplies in-memory OAuth credentials and callback handling for Sysdig. */
+export class EphemeralSysdigOAuthProvider implements OAuthClientProvider {
   private clientInfo: OAuthClientInformationMixed | undefined;
   private oauthTokens: OAuthTokens | undefined;
   private verifier: string | undefined;
   private discovery: OAuthDiscoveryState | undefined;
   private expectedState: string | undefined;
   private authorizationCode: Promise<string> | undefined;
+  private connectionEstablished = false;
 
   constructor(
     private readonly callback: SysdigOAuthCallback,
@@ -143,6 +176,7 @@ class EphemeralSysdigOAuthProvider implements OAuthClientProvider {
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
+      // Sysdig documents role-based authorization, not a granular read-only OAuth scope.
     };
   }
 
@@ -184,9 +218,26 @@ class EphemeralSysdigOAuthProvider implements OAuthClientProvider {
     return this.discovery;
   }
 
+  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
+    if (scope === "all" || scope === "client") this.clientInfo = undefined;
+    if (scope === "all" || scope === "tokens") this.oauthTokens = undefined;
+    if (scope === "all" || scope === "verifier") this.verifier = undefined;
+    if (scope === "all" || scope === "discovery") this.discovery = undefined;
+    if (scope === "all") this.expectedState = undefined;
+  }
+
+  markConnectionEstablished(): void {
+    this.connectionEstablished = true;
+  }
+
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
+    if (this.connectionEstablished) {
+      throw new UnauthorizedError("Sysdig credentials expired; reconnect required.");
+    }
     if (!this.expectedState) throw new Error("Sysdig OAuth state was not initialized.");
+    validateAuthorizationUrl(authorizationUrl);
     this.authorizationCode = this.callback.waitForCode(this.expectedState);
+    void this.authorizationCode.catch(() => {});
     process.stderr.write("[sysdig-mcp] Opening browser for Sysdig OAuth sign-in.\n");
     try {
       await openBrowser(authorizationUrl.toString());
@@ -201,43 +252,69 @@ class EphemeralSysdigOAuthProvider implements OAuthClientProvider {
     if (!this.authorizationCode) throw new Error("Sysdig OAuth authorization did not start.");
     return this.authorizationCode;
   }
+
+}
+
+/** Only allow browser redirects to HTTPS authorization servers on Sysdig domains. */
+export function validateAuthorizationUrl(authorizationUrl: URL): void {
+  const hostname = authorizationUrl.hostname.toLowerCase();
+  if (
+    authorizationUrl.protocol !== "https:" ||
+    (hostname !== "sysdig.com" && !hostname.endsWith(".sysdig.com")) ||
+    authorizationUrl.username ||
+    authorizationUrl.password
+  ) {
+    throw new Error("Sysdig OAuth authorization URL must use HTTPS on a sysdig.com host.");
+  }
 }
 
 async function openBrowser(url: string): Promise<void> {
   const wsl = Boolean(process.env["WSL_DISTRO_NAME"]);
+  const windowsRoot = process.env["SystemRoot"] ?? process.env["WINDIR"] ?? "C:\\Windows";
   const command =
-    process.platform === "win32" || wsl
-      ? "rundll32.exe"
+    process.platform === "win32"
+      ? join(windowsRoot, "System32", "rundll32.exe")
+      : wsl
+        ? "/mnt/c/Windows/System32/rundll32.exe"
       : process.platform === "darwin"
         ? "open"
         : "xdg-open";
-  const args = command === "rundll32.exe" ? ["url.dll,FileProtocolHandler", url] : [url];
+  const args = process.platform === "win32" || wsl ? ["url.dll,FileProtocolHandler", url] : [url];
   await execFileAsync(command, args, { windowsHide: true });
 }
 
+/** An authenticated upstream client and its cleanup handle. */
 export interface ConnectedSysdigClient {
-  client: Client;
+  readonly client: Client;
   close(): Promise<void>;
 }
 
-export async function connectSysdigClient(serverUrl: URL): Promise<ConnectedSysdigClient> {
-  const callback = new SysdigOAuthCallback();
+/** Establish and manage an authenticated connection to Sysdig's hosted MCP. */
+export async function connectSysdigClient(
+  serverUrl: URL,
+  callback = new SysdigOAuthCallback(),
+): Promise<ConnectedSysdigClient> {
   let client: Client | undefined;
   try {
     const redirectUrl = await callback.listen();
     const authProvider = new EphemeralSysdigOAuthProvider(callback, redirectUrl);
-    client = new Client({ name: "raven-sysdig-readonly-proxy", version: "0.2.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(serverUrl, { authProvider });
+    const createClient = () =>
+      new Client({ name: "raven-sysdig-readonly-proxy", version: "0.2.0" }, { capabilities: {} });
+    const createTransport = () => new StreamableHTTPClientTransport(serverUrl, { authProvider });
+    client = createClient();
+    let activeTransport = createTransport();
 
     try {
-      await client.connect(transport);
+      await client.connect(activeTransport);
     } catch (error) {
       if (!(error instanceof UnauthorizedError)) throw error;
       const authorizationCode = await authProvider.waitForAuthorizationCode();
-      await transport.finishAuth(authorizationCode);
-      await client.connect(new StreamableHTTPClientTransport(serverUrl, { authProvider }));
+      await activeTransport.finishAuth(authorizationCode);
+      activeTransport = createTransport();
+      await client.connect(activeTransport);
     }
 
+    authProvider.markConnectionEstablished();
     return {
       client,
       close: async () => {

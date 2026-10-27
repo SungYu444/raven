@@ -139,7 +139,7 @@ Servers map 1:1 to the keys in [`../.mcp.json`](../.mcp.json). The Atlassian-bac
 - It forwards opaque MCP requests/responses to a separately-hosted BC Gov API whose tool surface is defined remotely.
 
 #### Sysdig Secure — Raven read-only OAuth proxy — **data egress**
-The local `sysdig-mcp` package connects to Sysdig's hosted `/mcp/secure` endpoint using Streamable HTTP and its own interactive OAuth flow. It filters the remote catalog to tools explicitly marked read-only or included in Raven's reviewed read-only allowlist, then rechecks the policy before forwarding every call. It does not expose prompts/resources or write-capable tools. OAuth client state and tokens remain in process memory and are not stored in `~/.raven/.env`; users may need to authenticate again after the wrapper process restarts. The default endpoint is US East (`us1`); set `SYSDIG_SECURE_MCP_URL` for another supported region.
+The local `sysdig-mcp` package connects to Sysdig's US-East-hosted `/mcp/secure` endpoint using Streamable HTTP and interactive OAuth. It forwards tools marked `readOnlyHint: true`, vetoes tools marked `readOnlyHint: false`, and uses the existing fallback only for known tools without a hint. It rechecks the upstream catalog before every call and does not expose prompts or resources. Sysdig is a third-party service; its STRA has been completed and data sovereignty acknowledged. OAuth client state and tokens remain in process memory and are not stored in `~/.raven/.env`; users may need to authenticate again after the wrapper process restarts. Set `SYSDIG_SECURE_MCP_URL` to another supported regional endpoint if needed.
 
 Both remote integrations send MCP requests to their configured upstream services. Review each provider's OAuth permissions, data handling, and tool surface for FOIPPA and data-residency requirements.
 
@@ -200,6 +200,11 @@ Set in `~/.raven/.env` (`chmod 600`). **Sensitive** values are secrets — never
 |----------|-----------|:---------:|---------|---------|
 | `JARVIS_TOKEN` | required for jarvis | **yes** | jarvis | Personal Access Token to the remote Jarvis API |
 | `JARVIS_BASE_URL` | required with `JARVIS_TOKEN` | no | jarvis | configured remote base URL (`/mcp` appended if absent) |
+
+### Sysdig Secure
+| Variable | Required? | Sensitive | Used by | Purpose |
+|----------|-----------|:---------:|---------|---------|
+| `SYSDIG_SECURE_MCP_URL` | optional | no | sysdig-secure-mcp | hosted Sysdig Secure MCP endpoint (defaults to US East) |
 
 ### Sonar
 | Variable | Required? | Sensitive | Used by | Purpose |
@@ -272,4 +277,4 @@ npm run gen-inventory         # rewrite the GEN block in this file
 npm run gen-inventory:check   # CI gate: fails if the block is stale or any tool lacks a read/write hint
 ```
 
-`jarvis-mcp` is the exception among Raven-owned servers — it registers no tools in source (it proxies a remote surface), so its row is described from a constant in the generator. Hosted Sysdig is configured as a remote MCP server directly in `.mcp.json`; its OAuth-managed, dynamic tools are not part of the local generator or fixed tool totals. The env-var table above is still hand-maintained; cross-check it with `grep -rhoE 'process\.env(\.[A-Z_0-9]+|\["[A-Z_0-9]+"\])' packages/*/src scripts`.
+`jarvis-mcp` is the exception among Raven-owned servers — it registers no tools in source (it proxies a remote surface), so its row is described from a constant in the generator. Sysdig is configured as a local stdio proxy in `.mcp.json`; its OAuth-managed, dynamic tools are not part of the local generator or fixed tool totals. The env-var table above is still hand-maintained; cross-check it with `grep -rhoE 'process\.env(\.[A-Z_0-9]+|\["[A-Z_0-9]+"\])' packages/*/src scripts`.

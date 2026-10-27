@@ -1,5 +1,6 @@
 const DEFAULT_SYSDIG_MCP_URL = "https://secure.sysdig.com/mcp/secure";
 
+/** Resolve and validate the configured Sysdig Secure MCP endpoint. */
 export function resolveSysdigMcpUrl(
   env: Record<string, string | undefined> = process.env,
 ): URL {

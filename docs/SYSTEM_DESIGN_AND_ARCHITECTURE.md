@@ -82,7 +82,7 @@ MCP (Model Context Protocol) is an open standard created by Anthropic and adopte
 
 3. **Responses are text-only.** The MCP server returns plain text (formatted as Markdown). There is no mechanism for returning executable code, binary data, or system commands.
 
-4. **Raven-owned servers use local stdio.** These MCP servers run as child processes with no network listener. The Sysdig wrapper is a Raven-owned local stdio MCP server that connects upstream to Sysdig's hosted Streamable HTTP MCP using its own interactive OAuth session.
+4. **Raven-owned servers use local stdio.** These MCP servers run as child processes. During Sysdig sign-in, the wrapper briefly opens an ephemeral loopback-only (`127.0.0.1`) HTTP callback listener; upstream MCP traffic uses Streamable HTTP to Sysdig.
 
 ### 2.3 What the AI Sees
 
@@ -158,15 +158,15 @@ When the AI connects to RAVEN, it receives a tool manifest — a list of availab
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The diagram shows Raven-owned local servers. Sysdig Secure is reached through the Raven-owned read-only wrapper, which authenticates to the regional hosted MCP endpoint using OAuth.
+The diagram shows Raven-owned local servers. Sysdig Secure is reached through the Raven-owned read-only wrapper, which authenticates to the US-East-hosted third-party MCP endpoint using OAuth. The wrapper briefly listens on an ephemeral loopback port to receive the OAuth callback.
 
 ### 3.2 Key Architecture Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| **Raven-owned execution** | Raven-owned MCP servers run as local processes — no cloud deployment, no exposed ports |
-| **Raven-owned transport** | Raven-owned MCP servers use stdio; the Sysdig wrapper uses Streamable HTTP only for its fixed upstream |
-| **Sysdig read-only proxy** | A Raven-owned local stdio wrapper filters hosted Sysdig tools to an explicit read-only policy and authenticates upstream with OAuth; see [README](../README.md) and [TOOL_INVENTORY.md](TOOL_INVENTORY.md) |
+| **Raven-owned execution** | Raven-owned MCP servers run as local processes — no cloud deployment; the Sysdig OAuth callback briefly uses an ephemeral loopback-only port |
+| **Raven-owned transport** | Raven-owned MCP servers use stdio; the Sysdig wrapper uses Streamable HTTP to its configured upstream |
+| **Sysdig read-only proxy** | A Raven-owned local stdio wrapper forwards tools marked read-only by Sysdig (with its existing fallback for known tools without a hint), vetoes tools marked mutating, and rechecks the upstream catalog on calls; see [README](../README.md) and [TOOL_INVENTORY.md](TOOL_INVENTORY.md) |
 | **Separate credential store** | Raven-managed credentials use `~/.raven/.env` with `chmod 600` and never appear in code or MCP responses; the wrapper keeps Sysdig OAuth tokens in process memory only |
 | **Per-tool schema validation** | Zod schemas enforce parameter types, ranges, and enums at the boundary |
 | **PI scrubbing layer** | FOIPPA-compliant anonymization before data reaches the AI |
@@ -175,7 +175,7 @@ The diagram shows Raven-owned local servers. Sysdig Secure is reached through th
 
 ### 3.3 Package Structure
 
-RAVEN is a TypeScript monorepo with 20 packages — Raven-owned MCP servers plus the shared `auth` library, `pipeline` CLI, `server-ui`, and `raven-cli`:
+RAVEN is a TypeScript monorepo with 22 packages — Raven-owned MCP servers plus the shared `auth` library, `pipeline` CLI, `server-ui`, and `raven-cli`:
 
 ```
 packages/
@@ -632,7 +632,7 @@ RAVEN does not expose arbitrary HTTP or filesystem access. Tool output passes th
 - Jenkins (`JENKINS_URL` / `JENKINS_BASE_URL`), on-prem Azure DevOps Server (`ADO_BASE_URL`), SonarQube (`SONARQUBE_URL`), JFrog Artifactory (`ARTIFACTORY_URL`), and RFC Buddy (`RFCBUDDY_URL`), when configured
 - HTTPS object-storage hosts explicitly allowlisted for Artifactory direct downloads (`RAVEN_ARTIFACTORY_DOWNLOAD_REDIRECT_HOSTS`); these receive no Raven credentials
 - **The Jarvis application-inventory API** (`JARVIS_BASE_URL`, required when `JARVIS_TOKEN` is set; no default endpoint). `jarvis-mcp` is a dynamic proxy: any Jarvis tool call is forwarded to the configured endpoint with a Personal Access Token. Unlike the other servers, which implement a fixed set of tools locally against the systems above, `jarvis-mcp` forwards opaque MCP requests to a remote MCP endpoint — its tool surface is defined remotely. Jarvis and the Sysdig wrapper are remote MCP integrations and should be included in FOIPPA / data-residency review. The Jarvis destination is fixed by configuration, not chosen by the AI.
-- **Sysdig Secure** — `sysdig-secure-mcp` in `.mcp.json` starts Raven's local `sysdig-mcp` read-only proxy. It connects to the regional `/mcp/secure` HTTPS endpoint with Streamable HTTP and OAuth, exposes only tools marked or allowlisted as read-only, and rejects other tool calls. OAuth state and tokens stay in process memory; the default endpoint is US East (`us1`), configurable with `SYSDIG_SECURE_MCP_URL`. Interactive browser access is required.
+- **Sysdig Secure** — `sysdig-secure-mcp` in `.mcp.json` starts Raven's local `sysdig-mcp` proxy. It connects to the US-East-hosted `/mcp/secure` HTTPS endpoint with Streamable HTTP and OAuth, exposes tools marked `readOnlyHint: true`, and rejects tools marked `readOnlyHint: false`. OAuth state and tokens stay in process memory; the default endpoint is US East (`us1`), configurable with `SYSDIG_SECURE_MCP_URL`. Sysdig is a third-party service; its STRA has been completed and data sovereignty acknowledged. Interactive browser access is required.
 
 The AI cannot instruct RAVEN to phone home to an unconfigured host, exfiltrate data to an attacker-controlled URL, or communicate with any system not explicitly programmed into a tool.
 
@@ -678,7 +678,7 @@ The MCP protocol architecture makes this structurally difficult:
 | Requirement | How RAVEN Complies |
 |-------------|-------------------|
 | **FOIPPA s.30 (Protection of PI)** | PI scrubber anonymizes personal information before it reaches the AI. `RAVEN_SCRUB_PI=true` controls this globally. |
-| **FOIPPA s.30.1 (Storage in Canada)** | All enterprise data stays on BC Gov infrastructure. MCP servers run locally. GitHub Copilot Business does not retain data. |
+| **FOIPPA s.30.1 (Storage in Canada)** | Raven MCP servers run locally except configured hosted integrations. Sysdig Secure MCP is a US-East-hosted third-party service; its STRA has been completed and data sovereignty acknowledged. GitHub Copilot Business does not retain data. |
 | **BC Gov ISP (Information Security Policy)** | Credentials stored with restricted permissions (`chmod 600`). Authentication via SiteMinder SSO or Basic Auth. TLS for all network communication. |
 | **OWASP Top 10 — Injection** | Zod schema validation on all tool parameters. SSH command allowlist prevents shell injection. |
 | **OWASP Top 10 — Broken Access Control** | All operations use the authenticated user's permissions. No privilege escalation. |
@@ -780,7 +780,7 @@ Each MCP server is launched as a local Node.js process:
 
 **Security properties of this configuration:**
 
-- No network ports exposed (stdio only)
+- MCP uses stdio, except the Sysdig OAuth flow briefly binds an ephemeral loopback-only callback port.
 - No environment variables containing secrets in the config file
 - Each server is an isolated process with its own memory space
 - Credentials loaded from `~/.raven/.env` at runtime, not from the config

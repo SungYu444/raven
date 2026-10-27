@@ -139,7 +139,7 @@ Trust this file for build/test commands, project layout, conventions, and trust-
 
 # RAVEN MCP Tools — Chat-time Reference
 
-Everything above is for repo navigation and PR review. **The sections below are for Copilot Chat in IDEs when this repo's MCP servers are connected** (clients pick these up via `.mcp.json`). RAVEN's MCP servers connect only to your configured BC Gov upstreams (Jira, Confluence, Bitbucket, app servers, and — when enabled — ADO, Sonar, Artifactory, RFC Buddy, and the `jarvis-mcp` remote proxy); they add no third-party data sinks beyond those. Artifactory direct downloads may additionally read from explicitly allowlisted HTTPS storage hosts without sending Artifactory credentials. See [`../docs/TOOL_INVENTORY.md`](../docs/TOOL_INVENTORY.md).
+Everything above is for repo navigation and PR review. **The sections below are for Copilot Chat in IDEs when this repo's MCP servers are connected** (clients pick these up via `.mcp.json`). RAVEN connects to configured BC Gov upstreams and also to the hosted Jarvis and Sysdig MCP services. Sysdig Secure MCP is hosted in US East; its STRA has been completed and data sovereignty acknowledged. Artifactory direct downloads may additionally read from explicitly allowlisted HTTPS storage hosts without sending Artifactory credentials. See [`../docs/TOOL_INVENTORY.md`](../docs/TOOL_INVENTORY.md).
 
 **CRITICAL:** When a user asks you to do something, **actively call the tools** — do not just describe what you would do. Chain multiple tool calls together to complete multi-step tasks.
 

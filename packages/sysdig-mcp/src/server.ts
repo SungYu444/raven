@@ -10,8 +10,9 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { PiScrubber } from "@nrs/auth";
-import { filterReadOnlyTools } from "./read-only.js";
+import { filterReadOnlyTools, getInitialReadOnlyTools } from "./read-only.js";
 
+/** The upstream MCP client operations used by the local proxy. */
 export interface SysdigUpstreamClient {
   listTools(params?: { cursor?: string }): Promise<ListToolsResult>;
   callTool(
@@ -43,6 +44,34 @@ function normalizeToolResult(
   return { content: [{ type: "text", text: serialized }] };
 }
 
+function scrubToolResult(result: CallToolResult, scrubber: PiScrubber): CallToolResult {
+  const { structuredContent, ...unstructured } = result;
+  const scrubbed = scrubStringValues(unstructured, scrubber) as CallToolResult;
+  if (structuredContent === undefined) return scrubbed;
+
+  const serialized = JSON.stringify(structuredContent);
+  const scrubbedSerialized = scrubber.scrubText(serialized);
+  try {
+    return {
+      ...scrubbed,
+      structuredContent: JSON.parse(scrubbedSerialized) as Record<string, unknown>,
+    };
+  } catch {
+    return {
+      ...scrubbed,
+      content: [
+        ...scrubbed.content,
+        { type: "text", text: scrubbedSerialized },
+      ],
+    };
+  }
+}
+
+function safeErrorMessage(error: unknown, scrubber: PiScrubber): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return scrubber.scrubText(message);
+}
+
 async function findReadOnlyTool(
   client: SysdigUpstreamClient,
   toolName: string,
@@ -63,17 +92,21 @@ async function findReadOnlyTool(
   throw new Error("Sysdig tool catalog exceeded the pagination safety limit.");
 }
 
+/** Create a local MCP server that proxies only Sysdig's read-only tools. */
 export function createSysdigReadOnlyServer(
   getClient: () => Promise<SysdigUpstreamClient>,
+  getCachedClient: () => SysdigUpstreamClient | undefined = () => undefined,
 ): Server {
   const server = new Server(
     { name: "Raven Sysdig Read-only MCP", version: "0.2.0" },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: { listChanged: true } } },
   );
   const scrubber = new PiScrubber();
 
   server.setRequestHandler(ListToolsRequestSchema, async (request) => {
-    const result = await (await getClient()).listTools(request.params);
+    const upstream = getCachedClient();
+    if (!upstream) return { tools: getInitialReadOnlyTools() };
+    const result = await upstream.listTools(request.params);
     return {
       ...result,
       tools: filterReadOnlyTools(result.tools),
@@ -81,16 +114,26 @@ export function createSysdigReadOnlyServer(
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const upstream = await getClient();
-    const tool = await findReadOnlyTool(upstream, request.params.name);
+    let upstream: SysdigUpstreamClient;
+    let tool: Tool | undefined;
+    try {
+      upstream = await getClient();
+      tool = await findReadOnlyTool(upstream, request.params.name);
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, safeErrorMessage(error, scrubber));
+    }
     if (!tool) {
       throw new McpError(
         ErrorCode.InvalidParams,
         `Sysdig tool '${request.params.name}' is unavailable or is not approved as read-only.`,
       );
     }
-    const result = normalizeToolResult(await upstream.callTool(request.params));
-    return scrubStringValues(result, scrubber) as CallToolResult;
+    try {
+      const result = normalizeToolResult(await upstream.callTool(request.params));
+      return scrubToolResult(result, scrubber);
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, safeErrorMessage(error, scrubber));
+    }
   });
 
   return server;
