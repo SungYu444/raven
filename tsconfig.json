@@ -21,7 +21,6 @@
     { "path": "packages/rfcbuddy-mcp" },
     { "path": "packages/artifactory-mcp" },
     { "path": "packages/sharepoint-mcp" },
-    { "path": "packages/github-mcp" },
-    { "path": "packages/sysdig-mcp" }
+    { "path": "packages/github-mcp" }
   ]
 }
